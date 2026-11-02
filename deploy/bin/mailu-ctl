@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# mailu-ctl - Mailu 运维/管理命令行工具（读取 /etc/mailu-deploy/mailu-deploy.conf）
+# 用法: mailu-ctl <命令> [参数...]   执行 mailu-ctl help 查看全部命令
+# ---------------------------------------------------------------------------
+set -uo pipefail
+
+CTL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+CTL_BASE="$(cd "$CTL_DIR/.." && pwd)"
+if [ -f "$CTL_BASE/lib/common.sh" ]; then
+    # shellcheck source=../lib/common.sh
+    . "$CTL_BASE/lib/common.sh"
+    for lib in docker firewall tls mailu report; do
+        [ -f "$CTL_BASE/lib/${lib}.sh" ] && . "$CTL_BASE/lib/${lib}.sh"
+    done
+fi
+: "${MAILU_ROOT:=/mailu}"
+: "${MAILU_LANG:=zh}"
+mc_load_saved_config >/dev/null 2>&1 || true
+MAILU_SELF_DIR="$CTL_BASE"
+export MAILU_SELF_DIR
+
+ctl_require_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        mc_die "未找到 docker 命令"
+    fi
+}
+
+ctl_api() {
+    local method="$1" path="$2" data="${3:-}"
+    local url="https://$(mc_primary_hostname)/api/v1${path}"
+    if [ -n "$data" ]; then
+        curl -sS -k -X "$method" -H "Authorization: Bearer ${MAILU_API_TOKEN}" -H 'Content-Type: application/json' \
+            -d "$data" --max-time 30 "$url"
+    else
+        curl -sS -k -X "$method" -H "Authorization: Bearer ${MAILU_API_TOKEN}" --max-time 30 "$url"
+    fi
+}
+
+ctl_json_list() {
+    # 从 JSON 数组里提取某个字段的全部值
+    local json="$1" key="$2"
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$json" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(data, list):
+    for item in data:
+        if isinstance(item, dict) and item.get('$key'):
+            print(item['$key'])
+        elif isinstance(item, str):
+            print(item)
+" 2>/dev/null
+    else
+        printf '%s' "$json" | tr ',' '\n' | sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+    fi
+}
+
+ctl_usage() {
+    cat <<USAGE
+mailu-ctl - Mailu 管理工具
+
+用法: mailu-ctl <命令> [参数]
+
+  status                     查看容器状态与访问地址
+  doctor                     一键体检（容器/8080/限流/API/webmail/DNS/DNSSEC/DKIM/证书）
+  logs [服务名]              查看日志（默认 front，可用 admin/imap/smtp/antispam）
+  restart [服务]             重启全部或指定服务
+  down / up                  停止 / 启动全部容器
+  domains                    列出所有域名
+  users [域名]               列出账号（可指定域名）
+  aliases                    列出所有别名
+  add-domain <域名> [备注]   添加域名
+  add-user <前缀> <域名> [密码] [配额MB]
+                             添加邮箱账号（密码省略则随机生成）
+  passwd <邮箱> [新密码]     重置账号密码
+  add-alias <别名> <目标1,目标2>
+                             添加别名/转发
+  dkim <域名>                生成 DKIM 密钥并输出 DNS TXT 记录
+  dns <域名>                 输出该域名应配置的 DNS 记录
+  backup                     立即备份
+  update [--new-version 版本] 更新 Mailu
+  info                       输出中台接入信息（地址 + API 令牌）
+  shell [服务]               进入容器 shell（默认 admin）
+  help                       显示本帮助
+USAGE
+}
+
+ctl_status() { mc_status; }
+
+ctl_logs() {
+    ctl_require_docker
+    local service="${1:-front}"
+    ( cd "$MAILU_ROOT" && $(mc_compose_cmd) logs -f --tail=120 "$service" )
+}
+
+ctl_restart() {
+    ctl_require_docker
+    if [ "${1:-}" = "" ]; then
+        mc_compose "$MAILU_ROOT" restart
+    else
+        mc_compose "$MAILU_ROOT" restart "$1"
+    fi
+    mc_ok "重启完成"
+}
+
+ctl_domains() {
+    mc_info "域名列表:"
+    ctl_json_list "$(ctl_api GET /domain)" name
+}
+
+ctl_users() {
+    local json
+    json="$(ctl_api GET /user)"
+    if [ -n "${1:-}" ]; then
+        mc_info "账号列表（域名 $1）:"
+        ctl_json_list "$json" email | grep -E "@$1$" || mc_warn "该域名下没有账号"
+    else
+        mc_info "账号列表:"
+        ctl_json_list "$json" email
+    fi
+}
+
+ctl_aliases() {
+    mc_info "别名列表:"
+    ctl_json_list "$(ctl_api GET /alias)" email
+}
+
+ctl_add_domain() {
+    local domain="$1" comment="${2:-由 mailu-ctl 添加}"
+    [ -n "$domain" ] || mc_die "用法: mailu-ctl add-domain <域名> [备注]"
+    local resp
+    resp="$(ctl_api POST /domain "{\"name\":\"${domain}\",\"comment\":\"${comment}\"}")"
+    case "$resp" in
+        *created*) mc_ok "域名 $domain 已创建" ;;
+        *Duplicate*) mc_warn "域名 $domain 已存在" ;;
+        *) mc_warn "返回: $resp" ;;
+    esac
+    ctl_api POST "/domain/${domain}/dkim" >/dev/null 2>&1 && mc_info "已尝试生成 DKIM 密钥"
+}
+
+ctl_add_user() {
+    local localpart="${1:-}" domain="${2:-}" password="${3:-}" quota_mb="${4:-2048}"
+    [ -n "$localpart" ] && [ -n "$domain" ] || mc_die "用法: mailu-ctl add-user <前缀> <域名> [密码] [配额MB]"
+    if [ -z "$password" ]; then
+        password="$(mc_random_password 16)"
+        mc_info "已生成随机密码: $password"
+    fi
+    local quota_bytes=$(( quota_mb * 1048576 ))
+    local resp
+    resp="$(ctl_api POST /user "{\"email\":\"${localpart}@${domain}\",\"raw_password\":\"${password}\",\"quota_bytes\":${quota_bytes},\"enabled\":true}")"
+    case "$resp" in
+        *created*) mc_ok "账号 ${localpart}@${domain} 已创建" ;;
+        *already\ exists*|*Duplicate*) mc_warn "账号已存在" ;;
+        *) mc_warn "返回: $resp" ;;
+    esac
+    mc_plain "邮箱: ${localpart}@${domain}  密码: ${password}"
+}
+
+ctl_passwd() {
+    local email="${1:-}" password="${2:-}"
+    [ -n "$email" ] || mc_die "用法: mailu-ctl passwd <邮箱> [新密码]"
+    if [ -z "$password" ]; then
+        password="$(mc_random_password 16)"
+    fi
+    local resp
+    resp="$(ctl_api PATCH "/user/${email}" "{\"raw_password\":\"${password}\"}")"
+    case "$resp" in
+        *updated*) mc_ok "密码已重置" ;;
+        *) mc_warn "返回: $resp" ;;
+    esac
+    mc_plain "邮箱: ${email}  新密码: ${password}"
+}
+
+ctl_add_alias() {
+    local alias="${1:-}" dest="${2:-}"
+    [ -n "$alias" ] && [ -n "$dest" ] || mc_die "用法: mailu-ctl add-alias <别名> <目标1,目标2>"
+    local json_dest
+    json_dest="$(printf '%s' "$dest" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sed 's/.*/"&"/' | paste -sd, -)"
+    local resp
+    resp="$(ctl_api POST /alias "{\"email\":\"${alias}\",\"destination\":[${json_dest}]}")"
+    case "$resp" in
+        *created*) mc_ok "别名 $alias 已创建" ;;
+        *already\ exists*|*Duplicate*) mc_warn "别名已存在" ;;
+        *) mc_warn "返回: $resp" ;;
+    esac
+}
+
+ctl_dkim() {
+    local domain="${1:-$MAILU_DOMAIN}"
+    [ -n "$domain" ] || mc_die "用法: mailu-ctl dkim <域名>"
+    ctl_api POST "/domain/${domain}/dkim" >/dev/null 2>&1 || mc_warn "生成 DKIM 返回异常"
+    local json
+    json="$(ctl_api GET "/domain/${domain}")"
+    local dkim
+    dkim="$(mc_json_value "$json" dns_dkim)"
+    mc_hr
+    printf '域名: %s\n' "$domain"
+    printf 'DKIM TXT 记录名: dkim._domainkey.%s\n' "$domain"
+    printf 'DKIM TXT 记录值: %s\n' "${dkim:-<未能自动获取，请到 Mailu 后台“域名”页面查看>}"
+    mc_hr
+}
+
+ctl_dns() {
+    local domain="${1:-$MAILU_DOMAIN}"
+    local json
+    json="$(ctl_api GET "/domain/${domain}")"
+    local host
+    host="$(mc_primary_hostname)"
+    mc_hr
+    printf '域名 %s 需要配置的 DNS 记录:\n' "$domain"
+    printf '  MX   %s -> %s (优先级 10)\n' "$domain" "$(mc_json_value "$json" dns_mx | sed 's/^$/'$host'/')"
+    printf '  TXT  %s -> %s\n' "$domain" "$(mc_json_value "$json" dns_spf)"
+    printf '  TXT  dkim._domainkey.%s -> %s\n' "$domain" "$(mc_json_value "$json" dns_dkim)"
+    printf '  TXT  _dmarc.%s -> %s\n' "$domain" "$(mc_json_value "$json" dns_dmarc)"
+    mc_hr
+}
+
+ctl_info() {
+    mc_hr
+    printf '中台接入信息\n'
+    printf '  访问地址 : https://%s\n' "$(mc_primary_hostname)"
+    printf '  管理后台 : https://%s/admin\n' "$(mc_primary_hostname)"
+    printf '  网页邮箱 : https://%s/webmail\n' "$(mc_primary_hostname)"
+    printf '  API 地址 : https://%s/api/v1\n' "$(mc_primary_hostname)"
+    printf '  API 令牌 : %s\n' "${MAILU_API_TOKEN:-<未设置，请在 mailu.env 中设置 API_TOKEN 并重启>}"
+    printf '  IMAP/SMTP: %s (993/465/587)\n' "$(mc_primary_hostname)"
+    mc_hr
+}
+
+ctl_shell() {
+    ctl_require_docker
+    local service="${1:-admin}"
+    ( cd "$MAILU_ROOT" && $(mc_compose_cmd) exec "$service" /bin/sh )
+}
+
+ctl_doctor() {
+    # 一键体检：容器 / admin 端口 / 限流格式 / API / webmail / DNS / DKIM / 证书
+    local dstamp fail=0 code
+    ctl_require_docker
+    mc_hr
+    printf 'Mailu 健康诊断  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    mc_hr
+
+    printf '%-46s' '[1] 容器状态'
+    local up_count total
+    total="$(cd "$MAILU_ROOT" && $(mc_compose_cmd) ps -a 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')"
+    up_count="$(cd "$MAILU_ROOT" && $(mc_compose_cmd) ps 2>/dev/null | grep -c -E 'Up|running')"
+    if [ "${up_count:-0}" -ge 5 ]; then printf 'OK   (%s/%s up)\n' "$up_count" "$total"; else printf 'FAIL (%s/%s up)\n' "$up_count" "$total"; fail=$((fail+1)); fi
+
+    printf '%-46s' '[2] admin 8080 端口'
+    code="$(cd "$MAILU_ROOT" && $(mc_compose_cmd) exec -T admin sh -c 'curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/internal/auth/user' 2>/dev/null | tr -dc '0-9')"
+    if [ "${code:-000}" != "000" ] && [ -n "${code:-}" ]; then printf 'OK   (HTTP %s)\n' "$code"; else printf 'FAIL (连接失败：/admin 会 502、API 不可用)\n'; fail=$((fail+1)); fi
+
+    printf '%-46s' '[3] 限流配置格式'
+    local rl
+    rl="$(grep -E '^AUTH_RATELIMIT_IP=' "$MAILU_ROOT/mailu.env" 2>/dev/null | cut -d= -f2)"
+    if [ -z "$rl" ]; then printf 'OK   (未设置，使用默认值)\n'
+    elif printf '%s' "$rl" | grep -q '/'; then printf 'OK   (AUTH_RATELIMIT_IP=%s)\n' "$rl"
+    else printf 'FAIL (AUTH_RATELIMIT_IP=%s 缺少单位，需改为 %s/hour)\n' "$rl" "$rl"; fail=$((fail+1)); fi
+
+    printf '%-46s' '[4] REST API'
+    local token body
+    token="$(grep '^API_TOKEN=' "$MAILU_ROOT/mailu.env" 2>/dev/null | cut -d= -f2)"
+    if [ -z "$token" ]; then printf 'SKIP (mailu.env 未设置 API_TOKEN)\n'
+    else
+        body="$(ctl_api GET /domain 2>/dev/null)"
+        case "$body" in
+            \[*) printf 'OK   (GET /api/v1/domain 返回数组)\n' ;;
+            *500*) printf 'FAIL (接口 500，多为限流配置或数据库问题)\n'; fail=$((fail+1)) ;;
+            *403*|*401*) printf 'FAIL (令牌不匹配，检查 mailu.env 的 API_TOKEN 与中台填写值)\n'; fail=$((fail+1)) ;;
+            *) printf 'FAIL (响应异常: %s)\n' "$(printf '%s' "$body" | head -c 80)"; fail=$((fail+1)) ;;
+        esac
+    fi
+
+    printf '%-46s' '[5] 网页邮箱 / 后台'
+    local wh ah
+    wh="$(curl -sk -o /dev/null -w '%{http_code}' "https://$(mc_primary_hostname)/webmail/" 2>/dev/null)"
+    ah="$(curl -sk -o /dev/null -w '%{http_code}' "https://$(mc_primary_hostname)/admin" 2>/dev/null)"
+    if printf '%s' "$wh" | grep -qE '^(200|302|303|307)$' && printf '%s' "$ah" | grep -qE '^(200|302|303|307|308)$'; then
+        printf 'OK   (/webmail=%s, /admin=%s)\n' "$wh" "$ah"
+    else
+        printf 'FAIL (/webmail=%s, /admin=%s)\n' "$wh" "$ah"; fail=$((fail+1))
+    fi
+
+    printf '%-46s' '[6] DNS 解析'
+    local ips
+    ips="$(getent hosts "$(mc_primary_hostname)" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')"
+    if [ -n "$ips" ]; then printf 'OK   (%s -> %s)\n' "$(mc_primary_hostname)" "$ips"; else printf 'FAIL (主机名解析不到，Let'"'"'s Encrypt 会失败)\n'; fail=$((fail+1)); fi
+
+    printf '%-46s' '[7] DNSSEC 校验能力'
+    local dnssec
+    dnssec="$(cd "$MAILU_ROOT" && $(mc_compose_cmd) exec -T admin python3 -c "
+import dns.resolver, dns.flags
+r = dns.resolver.Resolver()
+r.use_edns(0, dns.flags.DO, 1232)
+r.flags = dns.flags.AD | dns.flags.RD
+ok = False
+for ns in r.nameservers:
+    try:
+        res = dns.resolver.Resolver(configure=False)
+        res.nameservers = [ns]; res.use_edns(0, dns.flags.DO, 1232)
+        q = res.resolve('example.org','A',lifetime=4)
+        if q.response.flags & dns.flags.AD: ok = True; print('AD', ns); break
+    except Exception: pass
+if not ok: print('NO')
+" 2>/dev/null | tr -d '\r')"
+    case "$dnssec" in
+        *AD*) printf 'OK   (%s)\n' "$dnssec" ;;
+        *) printf 'WARN (无 validating resolver；admin 可能起不来，建议加 unbound 或 dns: 9.9.9.9)\n' ;;
+    esac
+
+    printf '%-46s' '[8] DKIM 密钥'
+    if [ -n "$token" ]; then
+        local dj
+        dj="$(ctl_api GET "/domain/${MAILU_DOMAIN}")"
+        case "$dj" in
+            *dns_dkim*) printf 'OK   (%s 已生成)\n' "$MAILU_DOMAIN" ;;
+            *) printf 'WARN (未生成，执行: mailu-ctl dkim %s)\n' "$MAILU_DOMAIN" ;;
+        esac
+    else printf 'SKIP\n'; fi
+
+    printf '%-46s' '[9] 证书有效期'
+    local cert="$MAILU_ROOT/certs/cert.pem" days
+    if [ -f "$cert" ]; then
+        days="$(mc_cert_days_left "$cert")"
+        printf '%s 天\n' "${days:-未知}"
+    else printf '未找到 cert.pem\n'; fi
+
+    mc_hr
+    if [ "$fail" -eq 0 ]; then
+        printf '结论：未发现阻断性问题\n'
+    else
+        printf '结论：发现 %d 项问题，见上文 FAIL 行\n' "$fail"
+    fi
+    mc_hr
+    return "$fail"
+}
+
+cmd="${1:-help}"
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+    status) ctl_status ;;
+    doctor|check) ctl_doctor ;;
+    logs) ctl_logs "$@" ;;
+    restart) ctl_restart "$@" ;;
+    up) mc_compose_up ;;
+    down) mc_compose "$MAILU_ROOT" down ;;
+    domains) ctl_domains ;;
+    users) ctl_users "$@" ;;
+    aliases) ctl_aliases ;;
+    add-domain) ctl_add_domain "$@" ;;
+    add-user) ctl_add_user "$@" ;;
+    passwd|password) ctl_passwd "$@" ;;
+    add-alias) ctl_add_alias "$@" ;;
+    dkim) ctl_dkim "$@" ;;
+    dns) ctl_dns "$@" ;;
+    backup) mc_backup ;;
+    update) mc_update ;;
+    info) ctl_info ;;
+    shell) ctl_shell "$@" ;;
+    help|-h|--help) ctl_usage ;;
+    *) mc_err "未知命令: $cmd"; ctl_usage; exit 1 ;;
+esac

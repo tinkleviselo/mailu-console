@@ -1,0 +1,38 @@
+# ---- 运行期数据（绝不能提交） ----
+mailu-console/config/config.php
+mailu-console/storage/*.sqlite
+mailu-console/storage/*.sqlite-wal
+mailu-console/storage/*.sqlite-shm
+mailu-console/storage/schema.lock
+mailu-console/storage/logs/*
+mailu-console/storage/cache/*
+mailu-console/storage/deploy/*
+!mailu-console/storage/logs/.gitignore
+!mailu-console/storage/cache/.gitignore
+!mailu-console/storage/deploy/.gitignore
+
+# ---- 构建产物 ----
+dist/
+build/*.zip
+*.zip
+*.tar.gz
+
+# ---- 本地工具 / 测试临时目录 ----
+.tools/
+tests/.work/
+tmp/
+
+# ---- 编辑器与系统 ----
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+node_modules/
+
+# ---- 日志 ----
+logs/
+*.log

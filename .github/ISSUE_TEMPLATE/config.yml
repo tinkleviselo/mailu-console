@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 部署与排障文档
+    url: https://github.com/tinkleviselo/mailu-console/blob/main/docs/TROUBLESHOOTING.md
+    about: DNSSEC、限流、管理员权限、半成品数据库等真实案例
+  - name: 安全问题私下报告
+    url: https://github.com/tinkleviselo/mailu-console/security/advisories/new
+    about: 请勿在公开 Issue 中披露漏洞细节

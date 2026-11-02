@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不带 v），例如 1.0.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 计算版本与制品地址
+        id: meta
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # 制品根地址直接指向 GitHub Release 的 latest/download/，
+          # 这样发行版里的 install.sh 可以被 curl | bash 直接使用
+          echo "base_url=https://github.com/${GITHUB_REPOSITORY}/releases/latest/download" >> "$GITHUB_OUTPUT"
+
+      - name: 构建
+        run: |
+          python3 build/release.py \
+            --version "${{ steps.meta.outputs.version }}" \
+            --base-url "${{ steps.meta.outputs.base_url }}"
+
+      - name: 校验与清单
+        run: |
+          cat dist/latest.json
+          echo '--- SHA256SUMS ---'
+          cat dist/SHA256SUMS
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.meta.outputs.version }}
+          name: Mailu Console v${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/mailu-platform-*.zip
+            dist/mailu-console-*.zip
+            dist/mailu-console-web-*.zip
+            dist/mailu-deploy-*.zip
+            dist/mailu-deploy.bundle.sh
+            dist/install.sh
+            dist/latest.json
+            dist/SHA256SUMS

@@ -1,0 +1,80 @@
+# 中台生产部署：自动 HTTPS + 自动初始化 + 数据卷持久化
+# 用法:
+#   1) cp .env.example .env 并按需修改
+#   2) docker compose -f compose.prod.yaml up -d
+#   3) 浏览器打开 https://${MC_DOMAIN} ，用 MC_ADMIN_USER / MC_ADMIN_PASS 登录
+services:
+  console:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ${MC_IMAGE:-mailu-console:1.0.0}
+    restart: unless-stopped
+    environment:
+      MC_AUTO_INSTALL: "1"
+      MC_APP_NAME: ${MC_APP_NAME:-Mailu 邮件中台}
+      MC_ADMIN_USER: ${MC_ADMIN_USER:-admin}
+      MC_ADMIN_PASS: ${MC_ADMIN_PASS:?请设置 MC_ADMIN_PASS}
+      MC_ADMIN_EMAIL: ${MC_ADMIN_EMAIL:-}
+      MC_DB_DRIVER: ${MC_DB_DRIVER:-sqlite}
+      MC_DB_DATABASE: ${MC_DB_DATABASE:-mailu.sqlite}
+      MC_DB_HOST: ${MC_DB_HOST:-db}
+      MC_DB_PORT: ${MC_DB_PORT:-3306}
+      MC_DB_NAME: ${MC_DB_NAME:-mailu_console}
+      MC_DB_USER: ${MC_DB_USER:-mailu}
+      MC_DB_PASS: ${MC_DB_PASS:-}
+      MC_TIMEZONE: ${MC_TIMEZONE:-Asia/Shanghai}
+      MC_BASE_PATH: ${MC_BASE_PATH:-}
+      MC_MAILU_VERSION: ${MC_MAILU_VERSION:-2024.06.61}
+      MC_INSTALL_ARGS: ${MC_INSTALL_ARGS:-}
+    volumes:
+      - console-storage:/var/www/html/storage
+      - console-config:/var/www/html/config
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(@file_get_contents(\"http://127.0.0.1/healthz.php\") ? 0 : 1);'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    networks: [internal]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - console
+    environment:
+      MC_DOMAIN: ${MC_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+
+  # 可选：外部 MySQL（不需要就删掉这个服务并把 MC_DB_DRIVER 设为 sqlite）
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    profiles: ["mysql"]
+    environment:
+      MARIADB_DATABASE: ${MC_DB_NAME:-mailu_console}
+      MARIADB_USER: ${MC_DB_USER:-mailu}
+      MARIADB_PASSWORD: ${MC_DB_PASS:-changeme}
+      MARIADB_ROOT_PASSWORD: ${MC_DB_ROOT_PASS:-rootchangeme}
+    volumes:
+      - console-db:/var/lib/mysql
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  console-storage:
+  console-config:
+  caddy-data:
+  caddy-config:
+  console-db:

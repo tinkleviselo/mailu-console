@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php-lint:
+    name: PHP ${{ matrix.php }} 语法检查
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.1', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, curl, mbstring, zip, openssl
+          coverage: none
+      - name: 逐文件 php -l
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            php -l "$f" >/dev/null || { echo "FAIL $f"; fail=1; }
+          done < <(find mailu-console -name '*.php' -print0)
+          exit $fail
+
+  shell:
+    name: Shell 语法 + 部署脚本自检
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - name: bash -n
+        run: |
+          for f in deploy/install.sh deploy/lib/*.sh deploy/bin/* deploy/auto/*.sh deploy/packages/*.sh deploy/tests/*.sh tests/*.sh; do
+            bash -n "$f" || exit 1
+          done
+      - name: shellcheck
+        run: |
+          shellcheck -S error -s bash \
+            deploy/install.sh deploy/lib/*.sh deploy/auto/*.sh \
+            deploy/tests/*.sh deploy/packages/*.sh deploy/bin/mailu-ctl tests/*.sh
+      - name: 部署脚本自检（不需要 Docker / root）
+        run: bash deploy/tests/selfcheck.sh
+
+  smoke:
+    name: 中台端到端冒烟
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo_sqlite, curl, mbstring, zip, openssl
+          coverage: none
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 运行冒烟测试（模拟 Mailu API）
+        run: bash tests/run_smoke.sh
+
+  build:
+    name: 构建制品
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 打包
+        run: |
+          python3 build/package.py
+          python3 build/webvariant.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/*.zip
+            dist/mailu-deploy.bundle.sh
+          retention-days: 7
+
+  encoding:
+    name: 编码与敏感信息检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 必须 UTF-8 无 BOM + LF
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            head -c 3 "$f" | grep -q $'\xef\xbb\xbf' && { echo "BOM: $f"; fail=1; }
+            grep -q $'\r' "$f" && { echo "CRLF: $f"; fail=1; }
+          done < <(find . -path ./.git -prune -o -type f \( -name '*.php' -o -name '*.sh' -o -name '*.md' -o -name '*.yml' -o -name '*.py' \) -print0)
+          exit $fail
+      - name: 不含真实域名/密钥
+        run: |
+          ! grep -rIn --exclude-dir=.git -E '(API_TOKEN=[A-Za-z0-9]{20,}|BEGIN [A-Z ]*PRIVATE KEY|sk-[A-Za-z0-9]{20,})' .

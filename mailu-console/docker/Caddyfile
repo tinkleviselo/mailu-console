@@ -1,0 +1,26 @@
+# 自动 HTTPS 反向代理（Caddy 会自动申请并续期 Let's Encrypt 证书）
+{$MC_DOMAIN:localhost} {
+	encode gzip zstd
+
+	# 安全响应头
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# 只允许访问中台自身的路径，其余拒绝
+	@blocked path /storage/* /config/* /app/* /views/*
+	respond @blocked 404
+
+	reverse_proxy console:80 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

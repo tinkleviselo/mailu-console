@@ -1,0 +1,16 @@
+# 中台自身的 docker compose（可选部署方式）
+services:
+  mailu-console:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mailu-console:1.0.0
+    container_name: mailu-console
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ../storage:/var/www/html/storage
+      - ../config:/var/www/html/config
+    environment:
+      TZ: Asia/Shanghai

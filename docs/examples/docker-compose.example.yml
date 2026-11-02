@@ -1,0 +1,119 @@
+# 由 Mailu 部署脚本自动生成（示例，实际文件在 /mailu/docker-compose.yml）
+# Mailu 版本: 2024.06.61  镜像前缀: ghcr.io/mailu
+# 修改后执行: cd /mailu && docker compose up -d
+
+services:
+  redis:
+    image: redis:alpine
+    restart: always
+    volumes:
+      - "/mailu/redis:/data"
+
+  front:
+    image: ghcr.io/mailu/nginx:2024.06.61
+    restart: always
+    env_file: mailu.env
+    logging:
+      driver: journald
+      options:
+        tag: mailu-front
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+      - "0.0.0.0:443:443/udp"
+      - "0.0.0.0:25:25"
+      - "0.0.0.0:465:465"
+      - "0.0.0.0:587:587"
+      - "0.0.0.0:110:110"
+      - "0.0.0.0:995:995"
+      - "0.0.0.0:143:143"
+      - "0.0.0.0:993:993"
+      - "0.0.0.0:4190:4190"
+    networks:
+      - default
+      - webmail
+    volumes:
+      - "/mailu/certs:/certs"
+      - "/mailu/overrides/nginx:/overrides:ro"
+    depends_on:
+      - redis
+
+  imap:
+    image: ghcr.io/mailu/dovecot:2024.06.61
+    restart: always
+    env_file: mailu.env
+    logging:
+      driver: journald
+      options:
+        tag: mailu-imap
+    volumes:
+      - "/mailu/mail:/mail"
+      - "/mailu/overrides/dovecot:/overrides:ro"
+    depends_on:
+      - front
+
+  smtp:
+    image: ghcr.io/mailu/postfix:2024.06.61
+    restart: always
+    env_file: mailu.env
+    logging:
+      driver: journald
+      options:
+        tag: mailu-smtp
+    volumes:
+      - "/mailu/mailqueue:/queue"
+      - "/mailu/overrides/postfix:/overrides:ro"
+    depends_on:
+      - front
+
+  antispam:
+    image: ghcr.io/mailu/rspamd:2024.06.61
+    restart: always
+    env_file: mailu.env
+    logging:
+      driver: journald
+      options:
+        tag: mailu-antispam
+    volumes:
+      - "/mailu/filter:/var/lib/rspamd"
+      - "/mailu/dkim:/dkim:ro"
+      - "/mailu/overrides/rspamd:/etc/rspamd/override.d:ro"
+    depends_on:
+      - front
+
+  admin:
+    image: ghcr.io/mailu/admin:2024.06.61
+    restart: always
+    env_file: mailu.env
+    logging:
+      driver: journald
+      options:
+        tag: mailu-admin
+    volumes:
+      - "/mailu/data:/data"
+      - "/mailu/dkim:/dkim"
+    depends_on:
+      - redis
+
+  webmail:
+    image: ghcr.io/mailu/webmail:2024.06.61
+    restart: always
+    env_file: mailu.env
+    volumes:
+      - "/mailu/webmail:/data"
+      - "/mailu/overrides/snappymail:/overrides:ro"
+    networks:
+      - default
+      - webmail
+    depends_on:
+      - imap
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 192.168.203.0/24
+  webmail:
+    driver: bridge

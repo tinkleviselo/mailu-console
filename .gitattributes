@@ -1,0 +1,28 @@
+# 统一用 LF，避免 Windows 上编辑后 shell 脚本报 "$'\r': command not found"
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.php   text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.env   text eol=lf
+*.tpl   text eol=lf
+Dockerfile   text eol=lf
+Caddyfile    text eol=lf
+mailu-ctl    text eol=lf
+
+# 二进制
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.ico  binary
+*.zip  binary
+*.gz   binary
+
+# 语言统计
+*.php  linguist-language=PHP
+deploy/**/*.sh linguist-language=Shell
+mailu-ctl linguist-language=Shell

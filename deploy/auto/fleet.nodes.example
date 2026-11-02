@@ -1,0 +1,11 @@
+# Mailu 全局批量部署节点清单
+# 格式: 目标( user@host:port )  主域名  邮件主机名  [TLS模式]  ["额外参数"]
+# 说明:
+#   * 需要本机到目标机已配置 SSH 免密登录（ssh-keygen + ssh-copy-id）
+#   * TLS 模式: letsencrypt(默认) | certbot | cert | notls
+#   * 额外参数用双引号包裹，会原样转给 install.sh，例如 "--webmail roundcube --antivirus clamav"
+#   * 以 # 开头的行为注释，空行忽略
+
+root@203.0.113.10:22   example.com   mail.example.com   letsencrypt
+root@203.0.113.11:22   example.net   mail.example.net   letsencrypt
+deploy@198.51.100.7:2222  example.org  mail.example.org  cert   "--webmail roundcube"

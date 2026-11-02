@@ -1,0 +1,66 @@
+name: Bug 报告
+description: 中台或部署脚本出错 / 行为不符合预期
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认：
+        1. 已查阅 [docs/TROUBLESHOOTING.md](https://github.com/tinkleviselo/mailu-console/blob/main/docs/TROUBLESHOOTING.md)
+        2. **不要粘贴真实密码、API 令牌、邮箱地址、服务器 IP、域名**，用 `example.com` / `1.2.3.4` 代替
+  - type: dropdown
+    id: component
+    attributes:
+      label: 受影响组件
+      options:
+        - 中台（mailu-console）
+        - Linux 部署脚本（deploy）
+        - 自动部署（bootstrap / fleet-deploy）
+        - 构建与发布（build）
+        - 文档
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: `cat VERSION`，或 release 页面上的标签
+      placeholder: 1.0.0
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: 运行环境
+      description: PHP 版本 / 操作系统与版本 / 是否 Docker / Mailu 版本
+      placeholder: |
+        PHP 8.2 + pdo_sqlite
+        Ubuntu 22.04
+        Mailu 2024.06.61（docker compose）
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 中台 → 邮件服务器 → 添加服务器
+        2. 填入 https://mail.example.com 与 API 令牌
+        3. 点击「检查连接」
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果与日志
+      description: 中台日志在 `storage/logs/`；部署日志在 `/var/log/mailu-deploy.log`；容器日志用 `docker compose logs`
+      render: shell
+    validations:
+      required: true
